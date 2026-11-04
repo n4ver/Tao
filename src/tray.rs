@@ -94,7 +94,9 @@ fn initial_status(recent: &[RecentMove]) -> Option<String> {
 
 /// A faded, greyscale copy of an RGBA image, used as the icon while paused.
 fn greyed(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| {
             // Rec. 601 luma, then pulled towards mid-grey so both halves of
             // the symbol stay visible on light and dark taskbars.
@@ -507,7 +509,12 @@ mod tests {
         let rgba = include_bytes!("../assets/tray-icon.rgba");
         let grey = greyed(rgba);
         assert_eq!(grey.len(), rgba.len());
-        for (src, dst) in rgba.chunks_exact(4).zip(grey.chunks_exact(4)) {
+        for (src, dst) in rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(grey.as_chunks::<4>().0.iter())
+        {
             assert_eq!(dst[0], dst[1]);
             assert_eq!(dst[1], dst[2]);
             if src[3] == 0 {

@@ -14,6 +14,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            Write-Error "Tag ${{ github.ref_name }} does not match Cargo.toml version $version"
+            exit 1
+          }
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -21,20 +30,29 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --all --locked
 
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release --locked
 
       - name: Package
+        id: package
         shell: pwsh
         run: |
-          $name = "tao"
           $tag = "${{ github.ref_name }}"
-          $dir = "$name-$tag-windows-x64"
+          $dir = "tao-$tag-windows-x64"
           New-Item -ItemType Directory -Path $dir | Out-Null
-          Copy-Item "target/release/$name.exe" $dir
-          Copy-Item README.md $dir
+          # Both executables: tao.exe (CLI) and taow.exe (tray / background watcher).
+          # They must stay in the same folder for `tao install` to work.
+          Copy-Item target/release/tao.exe, target/release/taow.exe, README.md $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" | Out-File "$dir.zip.sha256" -Encoding ascii
-          "ASSET=$dir.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "asset=$dir.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.asset }}
+            ${{ steps.package.outputs.asset }}.sha256
+          generate_release_notes: true
