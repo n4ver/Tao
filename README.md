@@ -93,7 +93,7 @@ rescans every 10 minutes in case it missed an event.
 
 ### Tray icon
 
-The watcher shows a yin-yang icon in the notification area. Hovering over it
+The watcher shows a little pixel-art ghost in a hat in the notification area. Hovering over it
 shows the latest move; left- or right-clicking opens the menu:
 
 | Item               | What it does                                                                 |
