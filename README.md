@@ -48,7 +48,7 @@ folder; a good permanent home is `%LOCALAPPDATA%\Programs\Tao\`.
 | File          | What it is                                                    |
 |---------------|---------------------------------------------------------------|
 | `tao.exe`     | The command-line tool. Use this for everything.               |
-| `taow.exe`    | The background watcher, with no console window. `install` registers it to start at sign-in. |
+| `taow.exe`    | The background watcher with a tray icon and no console window. `install` registers it to start at sign-in. |
 
 ### Why two executables?
 
@@ -57,8 +57,9 @@ Windows decides whether a program gets a console window from a flag in the
 started at sign-in opens a terminal window; a GUI-subsystem program has no
 window, but `cmd`/PowerShell don't wait for it and its output can't be
 reliably redirected. Rather than pick one wart, `taow.exe` is built with
-`#![windows_subsystem = "windows"]` and only runs the watcher, logging to a
-file, while `tao.exe` stays a normal console program. It's the same split
+`#![windows_subsystem = "windows"]` and only runs the watcher (with its tray
+icon), logging everything, errors included, to a file, while `tao.exe`
+stays a normal console program. It's the same split
 as `python.exe` / `pythonw.exe`. Both are thin wrappers around the same
 library code.
 
@@ -69,8 +70,9 @@ tao sort --dry-run     # show what would be moved, change nothing
 tao sort               # sort everything currently in Downloads
 tao undo               # put back everything moved by the last run
 tao undo --last 3      # put back the 3 most recent moves, across runs
-tao watch              # run the watcher in this terminal (Ctrl+C to stop)
-tao install            # start the watcher at every sign-in, and start it now
+tao watch              # run the watcher from this terminal, with a tray icon
+tao watch --headless   # ...without the tray icon (Ctrl+C to stop)
+tao install            # start the watcher (taow.exe) at every sign-in, and start it now
 tao uninstall          # remove the sign-in entry
 tao config             # open the rules file in your editor
 tao -v <command>       # with debug output
@@ -88,6 +90,26 @@ so running `tao watch` while the background one is active just exits.
 
 On startup the watcher also sorts anything already in Downloads, and it
 rescans every 10 minutes in case it missed an event.
+
+### Tray icon
+
+The watcher shows a yin-yang icon in the notification area. Hovering over it
+shows the latest move; left- or right-clicking opens the menu:
+
+| Item               | What it does                                                                 |
+|--------------------|------------------------------------------------------------------------------|
+| **Recent moves**   | The last 10 moves still in effect, live. Click one to open its folder in Explorer with the file selected. |
+| **Sort now**       | Rescans Downloads right away, including files it had given up on (e.g. ones that were locked). Files still wait the usual `stable_seconds`. |
+| **Undo last move** | Same as `tao undo --last 1`.                                                 |
+| **Pause / Resume** | Stops moving files (the icon turns grey). Resuming catches up on whatever arrived meanwhile. |
+| **Open config**    | Same as `tao config`.                                                        |
+| **Quit**           | Lets a move in progress finish, then exits.                                  |
+
+If the tray icon can't be created (or on non-Windows systems), the watcher
+logs why and carries on headless. `taow.exe --headless` skips the tray
+deliberately. If the watcher itself stops, for example because the config
+became invalid at startup, the icon stays, with the reason in its tooltip, so
+you can open the config, fix it, and quit.
 
 ## Files
 
@@ -218,9 +240,19 @@ throwaway key under `HKCU\Software\tao-test-<pid>`, never the real
 | `journal.rs`    | SQLite move log                                                   |
 | `undo.rs`       | Reversing logged moves                                            |
 | `stable.rs`     | "Has this file stopped changing?" tracker (pure, clock injected)  |
-| `watch.rs`      | Watcher loop: events, rescans, retries, config reload             |
+| `watch.rs`      | Watcher loop: events, rescans, retries, config reload, commands   |
+| `tray.rs`       | Tray icon and menu (`tao` event loop on the main thread)          |
+| `logging.rs`    | Console and daily log-file output                                 |
 | `startup.rs`    | HKCU `Run` entry                                                  |
 | `win.rs`        | Win32 helpers: named mutex, ShellExecute                          |
+
+The tray runs the `tao` event loop on the main thread, which Windows requires
+because tray clicks arrive as window messages to the thread that created the
+icon. The watcher runs on a second thread, posts `WatchEvent`s to the loop
+through an `EventLoopProxy`, and takes commands (sort now, undo, pause,
+quit) over a channel. The icon is 32×32 RGBA bytes embedded with
+`include_bytes!` from `assets/tray-icon.rgba`; `assets/make-icon.ps1`
+regenerates it.
 
 ### Extension points
 

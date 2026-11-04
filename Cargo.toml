@@ -1,6 +1,6 @@
 [package]
 name = "tao"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Sorts the Windows Downloads folder into category folders, fully locally"
 default-run = "tao"
@@ -24,6 +24,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tempfile = "3.27.0"
 
 [target."cfg(windows)".dependencies]
+tray-icon = "0.26.1"
+# The `tao` windowing/event-loop crate. Renamed because this package is also
+# called `tao`, and two crates with one name can't both be in scope.
+tao_loop = { package = "tao", version = "0.37.2" }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 winreg = "0.56.0"
 

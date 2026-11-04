@@ -240,6 +240,14 @@ impl Journal {
         )
     }
 
+    /// The `n` most recent completed moves that haven't been undone, newest first.
+    pub fn recent_moves(&self, n: u32) -> Result<Vec<MoveRecord>> {
+        self.query(
+            "WHERE status = 'done' ORDER BY id DESC LIMIT ?1",
+            params![n],
+        )
+    }
+
     /// True if `path` is a file that `undo` put back and that hasn't changed
     /// since (same size and last-write time). The watcher leaves such files
     /// alone; otherwise undoing a move would just trigger it again.

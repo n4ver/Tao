@@ -23,7 +23,12 @@ pub enum Command {
         dry_run: bool,
     },
     /// Watch Downloads and sort new files as they finish downloading.
-    Watch,
+    /// Shows a system tray icon on Windows.
+    Watch {
+        /// Run without the tray icon (until Ctrl+C or the process is ended).
+        #[arg(long)]
+        headless: bool,
+    },
     /// Move files back to where they came from, using the move log.
     Undo {
         /// Undo the last N individual moves instead of the last run.

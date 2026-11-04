@@ -1,0 +1,2 @@
+# Raw pixel data: never convert line endings.
+*.rgba binary

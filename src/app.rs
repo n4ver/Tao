@@ -18,7 +18,7 @@ use crate::undo::{UndoOutcome, undo};
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Sort { dry_run } => sort(dry_run),
-        Command::Watch => crate::watch::run(),
+        Command::Watch { headless } => crate::tray::run_watch(headless),
         Command::Undo { last } => undo_cmd(last),
         Command::Install => install(),
         Command::Uninstall => uninstall(),
