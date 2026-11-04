@@ -37,4 +37,4 @@ jobs:
           Copy-Item README.md $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" | Out-File "$dir.zip.sha256" -Encoding ascii
-          "ASSET=$dir.zip" | Out-File -FilePath
+          "ASSET=$dir.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
