@@ -50,19 +50,6 @@ folder; a good permanent home is `%LOCALAPPDATA%\Programs\Tao\`.
 | `tao.exe`     | The command-line tool. Use this for everything.               |
 | `taow.exe`    | The background watcher with a tray icon and no console window. `install` registers it to start at sign-in. |
 
-### Why two executables?
-
-Windows decides whether a program gets a console window from a flag in the
-.exe header (the *subsystem*), before the program runs. A console program
-started at sign-in opens a terminal window; a GUI-subsystem program has no
-window, but `cmd`/PowerShell don't wait for it and its output can't be
-reliably redirected. Rather than pick one wart, `taow.exe` is built with
-`#![windows_subsystem = "windows"]` and only runs the watcher (with its tray
-icon), logging everything, errors included, to a file, while `tao.exe`
-stays a normal console program. It's the same split
-as `python.exe` / `pythonw.exe`. Both are thin wrappers around the same
-library code.
-
 ## Usage
 
 ```powershell
@@ -92,9 +79,6 @@ On startup the watcher also sorts anything already in Downloads, and it
 rescans every 10 minutes in case it missed an event.
 
 ### Tray icon
-
-The watcher shows a little pixel-art ghost in a hat in the notification area. Hovering over it
-shows the latest move; left- or right-clicking opens the menu:
 
 | Item               | What it does                                                                 |
 |--------------------|------------------------------------------------------------------------------|
