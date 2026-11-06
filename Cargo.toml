@@ -1,6 +1,6 @@
 [package]
 name = "tao"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # Set by tray-icon/muda (Windows-only deps); checked with `cargo +1.89 check`
 # failing and `cargo +1.90 test` passing. CI keeps it honest.
