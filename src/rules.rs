@@ -9,12 +9,14 @@ use regex::{Regex, RegexBuilder};
 
 use crate::config::RuleConfig;
 use crate::facts::FileFacts;
+use crate::zone::{self, ZoneInfo};
 
 /// One test a file must pass. A rule matches when all its conditions do.
 ///
 /// To match on new facts, add a variant here and a field or method on
-/// [`FileFacts`]. The planned next one is
-/// `SourceUrl(Regex)`, matching the `HostUrl` in the Zone.Identifier stream.
+/// [`FileFacts`]. Expensive facts (like the Zone.Identifier stream) should
+/// be lazy on `FileFacts`, and their conditions compiled last so that
+/// cheaper ones can rule a file out first.
 #[derive(Debug)]
 enum Condition {
     /// Lower-case suffixes without the leading dot, e.g. `pdf` or `tar.gz`.
@@ -23,6 +25,13 @@ enum Condition {
     Regex(Regex),
     OlderThan(Duration),
     NewerThan(Duration),
+    /// Inclusive, in bytes.
+    MinSize(u64),
+    MaxSize(u64),
+    /// Matched against HostUrl and ReferrerUrl.
+    SourceUrl(Regex),
+    /// Normalised host names; see [`zone::host_matches`].
+    SourceHost(Vec<String>),
 }
 
 impl Condition {
@@ -36,6 +45,25 @@ impl Condition {
             Condition::Regex(re) => re.is_match(&facts.file_name),
             Condition::OlderThan(d) => facts.age(now) > *d,
             Condition::NewerThan(d) => facts.age(now) < *d,
+            Condition::MinSize(n) => facts.size >= *n,
+            Condition::MaxSize(n) => facts.size <= *n,
+            Condition::SourceUrl(_) | Condition::SourceHost(_) => {
+                self.matching_url(facts).is_some()
+            }
+        }
+    }
+
+    /// For source conditions, the first recorded URL that satisfies them.
+    /// Always `None` (without reading the stream) for other conditions.
+    fn matching_url<'f>(&self, facts: &'f FileFacts) -> Option<&'f str> {
+        // A closure so that the stream is only read for source conditions.
+        let urls = || facts.zone().into_iter().flat_map(ZoneInfo::urls);
+        match self {
+            Condition::SourceUrl(re) => urls().find(|url| re.is_match(url)),
+            Condition::SourceHost(hosts) => urls().find(|url| {
+                zone::host_of(url).is_some_and(|h| hosts.iter().any(|p| zone::host_matches(&h, p)))
+            }),
+            _ => None,
         }
     }
 }
@@ -52,6 +80,16 @@ pub struct Rule {
 impl Rule {
     pub fn matches(&self, facts: &FileFacts, now: SystemTime) -> bool {
         self.conditions.iter().all(|c| c.matches(facts, now))
+    }
+
+    /// The download URL that a `source_url`/`source_host` condition of this
+    /// rule matched, for showing in dry-run output and the move log. `None`
+    /// if the rule has no source conditions.
+    pub fn matched_source(&self, facts: &FileFacts) -> Option<String> {
+        self.conditions
+            .iter()
+            .find_map(|c| c.matching_url(facts))
+            .map(str::to_string)
     }
 
     fn compile(cfg: &RuleConfig) -> Result<Self> {
@@ -89,11 +127,19 @@ impl Rule {
         if let Some(text) = &cfg.newer_than {
             conditions.push(Condition::NewerThan(parse_duration(text)?));
         }
+        conditions.extend(compile_sizes(cfg)?);
+        // Source conditions last: they are the only ones that read from disk
+        // (the Zone.Identifier stream), and `all()` stops at the first
+        // condition that fails.
+        conditions.extend(compile_sources(cfg)?);
 
         if conditions.is_empty() {
             // A rule with no conditions would match every file and make every
             // rule after it dead. `fallback_dest` is the way to say "everything else".
-            bail!("rule has no conditions (use extensions, glob, regex, older_than or newer_than)");
+            bail!(
+                "rule has no conditions (use extensions, glob, regex, older_than, newer_than, \
+                 min_size, max_size, source_url or source_host)"
+            );
         }
         if cfg.dest.as_os_str().is_empty() {
             bail!("rule has an empty `dest`");
@@ -105,6 +151,41 @@ impl Rule {
             conditions,
         })
     }
+}
+
+fn compile_sizes(cfg: &RuleConfig) -> Result<Vec<Condition>> {
+    let min = cfg.min_size.as_deref().map(parse_size).transpose()?;
+    let max = cfg.max_size.as_deref().map(parse_size).transpose()?;
+    if let (Some(min), Some(max)) = (min, max)
+        && min > max
+    {
+        bail!("min_size ({min} bytes) is larger than max_size ({max} bytes), so nothing can match");
+    }
+    Ok(min
+        .map(Condition::MinSize)
+        .into_iter()
+        .chain(max.map(Condition::MaxSize))
+        .collect())
+}
+
+fn compile_sources(cfg: &RuleConfig) -> Result<Vec<Condition>> {
+    let mut conditions = Vec::new();
+    if let Some(pattern) = &cfg.source_url {
+        let re = RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .build()
+            .with_context(|| format!("invalid source_url regex {pattern:?}"))?;
+        conditions.push(Condition::SourceUrl(re));
+    }
+    if !cfg.source_host.is_empty() {
+        let hosts = cfg
+            .source_host
+            .iter()
+            .map(|h| zone::normalize_host_pattern(h))
+            .collect::<Result<_>>()?;
+        conditions.push(Condition::SourceHost(hosts));
+    }
+    Ok(conditions)
 }
 
 /// Rules in config order. The first match wins.
@@ -174,6 +255,47 @@ pub fn parse_duration(text: &str) -> Result<Duration> {
         .checked_mul(secs_per_unit)
         .with_context(|| format!("duration {text:?} is too large"))?;
     Ok(Duration::from_secs(secs))
+}
+
+/// Parses sizes like `20KB`, `500MB`, `1.5GB`, `700 B`.
+///
+/// Units are binary (1 KB = 1024 bytes, 1 MB = 1024 KB, ...), because that
+/// is what Explorer's Size column shows under the same "KB"/"MB" labels, and
+/// that is where people will compare against. `KiB`, `MiB`, ... are accepted
+/// as the same thing. Units are case-insensitive and required. Fractions are
+/// computed in integer arithmetic (no float rounding surprises) and rounded
+/// down to whole bytes.
+pub fn parse_size(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .with_context(|| format!("size {text:?} needs a unit: B, KB, MB, GB or TB"))?;
+    let (num, unit) = text.split_at(split);
+    let shift = match unit.trim().to_ascii_lowercase().as_str() {
+        "b" => 0,
+        "kb" | "kib" => 10,
+        "mb" | "mib" => 20,
+        "gb" | "gib" => 30,
+        "tb" | "tib" => 40,
+        other => bail!("unknown size unit {other:?} in {text:?} (use B, KB, MB, GB or TB)"),
+    };
+    let (whole, frac) = num.split_once('.').unwrap_or((num, ""));
+    let digits_only = |s: &str| s.bytes().all(|b| b.is_ascii_digit());
+    // `.5GB` and `5.GB` are rejected as typos, as is a second dot.
+    if whole.is_empty() || (num.contains('.') && frac.is_empty()) || !digits_only(frac) {
+        bail!("size {text:?} must be a number like 500 or 1.5, followed by a unit");
+    }
+    let too_large = || format!("size {text:?} is too large");
+    let whole: u64 = whole.parse().with_context(too_large)?;
+    let mut bytes = whole.checked_mul(1 << shift).with_context(too_large)?;
+    if !frac.is_empty() {
+        // 18 digits fit in a u64; shifted by up to 40 bits they fit in a u128.
+        let frac = &frac[..frac.len().min(18)];
+        let numerator = u128::from(frac.parse::<u64>().expect("digits checked above")) << shift;
+        let part = numerator / 10u128.pow(frac.len() as u32);
+        bytes = bytes.checked_add(part as u64).with_context(too_large)?;
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -334,5 +456,218 @@ mod tests {
         assert!(parse_duration("d").is_err());
         assert!(parse_duration("1y").is_err());
         assert!(parse_duration("99999999999999999999w").is_err());
+    }
+
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+
+    fn sized(name: &str, size: u64) -> FileFacts {
+        let mut f = file(name);
+        f.size = size;
+        f
+    }
+
+    fn from(name: &str, host_url: Option<&str>, referrer: Option<&str>) -> FileFacts {
+        file(name).with_zone(Some(ZoneInfo {
+            zone_id: Some(3),
+            host_url: host_url.map(String::from),
+            referrer_url: referrer.map(String::from),
+        }))
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("0B").unwrap(), 0);
+        assert_eq!(parse_size("700 B").unwrap(), 700);
+        assert_eq!(parse_size("20KB").unwrap(), 20 * KB);
+        assert_eq!(parse_size("20kib").unwrap(), 20 * KB);
+        assert_eq!(parse_size(" 500MB ").unwrap(), 500 * MB);
+        assert_eq!(parse_size("500mb").unwrap(), 500 * MB);
+        assert_eq!(parse_size("1.5GB").unwrap(), GB + GB / 2);
+        assert_eq!(parse_size("1.5 GiB").unwrap(), GB + GB / 2);
+        assert_eq!(parse_size("2TB").unwrap(), 2 * 1024 * GB);
+        // Rounded down to whole bytes: 0.001 KB = 1.024 bytes.
+        assert_eq!(parse_size("0.001KB").unwrap(), 1);
+        assert_eq!(parse_size("0.1B").unwrap(), 0);
+        for bad in [
+            "",
+            "500",
+            "MB",
+            "1.5",
+            "-1MB",
+            ".5GB",
+            "5.GB",
+            "1.2.3MB",
+            "1,5GB",
+            "5 megabytes",
+            "5PB",
+            "5 M B",
+            "99999999999999999999B",
+            "16777216TB",
+        ] {
+            assert!(parse_size(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn size_bounds_are_inclusive() {
+        let rules = RuleSet::compile(&[
+            rule("Big", |r| r.min_size = Some("1MB".into())),
+            rule("Small", |r| r.max_size = Some("20KB".into())),
+        ])
+        .unwrap();
+        assert_eq!(matched(&rules, &sized("a", MB)), Some("Big"));
+        assert_eq!(matched(&rules, &sized("a", MB - 1)), None);
+        assert_eq!(matched(&rules, &sized("a", 20 * KB)), Some("Small"));
+        assert_eq!(matched(&rules, &sized("a", 20 * KB + 1)), None);
+        assert_eq!(matched(&rules, &sized("a", 0)), Some("Small"));
+    }
+
+    #[test]
+    fn size_range_in_one_rule() {
+        let rules = RuleSet::compile(&[rule("Exactly1K", |r| {
+            r.min_size = Some("1KB".into());
+            r.max_size = Some("1KB".into());
+        })])
+        .unwrap();
+        assert_eq!(matched(&rules, &sized("a", KB)), Some("Exactly1K"));
+        assert_eq!(matched(&rules, &sized("a", KB - 1)), None);
+        assert_eq!(matched(&rules, &sized("a", KB + 1)), None);
+    }
+
+    #[test]
+    fn invalid_sizes_name_the_rule() {
+        let err = RuleSet::compile(&[rule("Videos", |r| r.min_size = Some("500 megs".into()))])
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("rule #1") && msg.contains("Videos") && msg.contains("500 megs"),
+            "{msg}"
+        );
+
+        let err = RuleSet::compile(&[rule("Backwards", |r| {
+            r.min_size = Some("2MB".into());
+            r.max_size = Some("1MB".into());
+        })])
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Backwards") && msg.contains("larger than max_size"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn source_host_matches_either_url_by_suffix() {
+        let rules = RuleSet::compile(&[rule("GitHub", |r| {
+            r.source_host = vec!["GitHub.com".into()]
+        })])
+        .unwrap();
+        // GitHub release assets: HostUrl on another domain, referrer on github.com.
+        let release = from(
+            "tool.zip",
+            Some("https://objects.githubusercontent.com/asset"),
+            Some("https://github.com/o/r/releases"),
+        );
+        assert_eq!(matched(&rules, &release), Some("GitHub"));
+        let rule = rules.first_match(&release, now()).unwrap();
+        assert_eq!(
+            rule.matched_source(&release).as_deref(),
+            Some("https://github.com/o/r/releases")
+        );
+        let sub = from("a.zip", Some("https://codeload.github.com/o/r/zip"), None);
+        assert_eq!(matched(&rules, &sub), Some("GitHub"));
+        let lookalike = from("a.zip", Some("https://notgithub.com/x"), None);
+        assert_eq!(matched(&rules, &lookalike), None);
+        // No stream, or a stream without URLs, never matches a source condition.
+        assert_eq!(matched(&rules, &file("a.zip").with_zone(None)), None);
+        assert_eq!(matched(&rules, &from("a.zip", None, None)), None);
+    }
+
+    #[test]
+    fn source_url_regex_is_case_insensitive() {
+        let rules = RuleSet::compile(&[rule("Drive", |r| {
+            r.source_url = Some(r"drive\.google\.com/.*export".into())
+        })])
+        .unwrap();
+        let url = "https://DRIVE.GOOGLE.COM/u/0/EXPORT?id=1";
+        let f = from("doc.pdf", Some(url), None);
+        assert_eq!(matched(&rules, &f), Some("Drive"));
+        let rule = rules.first_match(&f, now()).unwrap();
+        assert_eq!(rule.matched_source(&f).as_deref(), Some(url));
+        let other = from("doc.pdf", Some("https://x.com/"), None);
+        assert_eq!(matched(&rules, &other), None);
+    }
+
+    #[test]
+    fn invalid_source_conditions_name_the_rule() {
+        let err = RuleSet::compile(&[rule("BadHost", |r| {
+            r.source_host = vec!["https://github.com/".into()]
+        })])
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("BadHost") && msg.contains("host name"),
+            "{msg}"
+        );
+        let err =
+            RuleSet::compile(&[rule("BadUrl", |r| r.source_url = Some("(".into()))]).unwrap_err();
+        assert!(format!("{err:#}").contains("BadUrl"));
+    }
+
+    /// Rules without source conditions, and rules whose cheaper conditions
+    /// already failed, must not read the Zone.Identifier stream.
+    #[test]
+    fn stream_is_only_read_when_a_source_condition_is_evaluated() {
+        let plain = RuleSet::compile(&[
+            rule("Docs", |r| r.extensions = vec!["pdf".into()]),
+            rule("Big", |r| r.min_size = Some("1MB".into())),
+        ])
+        .unwrap();
+        let f = file("x.zip");
+        assert_eq!(matched(&plain, &f), None);
+        assert!(!f.zone_was_read());
+        // matched_source on a rule without source conditions doesn't read it either.
+        let f = file("x.pdf");
+        let rule = plain.first_match(&f, now()).unwrap();
+        assert_eq!(rule.matched_source(&f), None);
+        assert!(!f.zone_was_read());
+
+        let sourced = RuleSet::compile(&[rule_cfg_github_pdfs()]).unwrap();
+        let f = file("x.zip");
+        assert_eq!(matched(&sourced, &f), None);
+        assert!(!f.zone_was_read(), "extension failed first, so no read");
+        let f = file("x.pdf");
+        assert_eq!(matched(&sourced, &f), None);
+        assert!(f.zone_was_read());
+    }
+
+    fn rule_cfg_github_pdfs() -> RuleConfig {
+        rule("GitHubPdfs", |r| {
+            // Written in the config with the source condition first, to show
+            // that compile order (not config order) decides evaluation order.
+            r.source_host = vec!["github.com".into()];
+            r.extensions = vec!["pdf".into()];
+        })
+    }
+
+    #[test]
+    fn commented_example_rule_in_default_config_is_valid() {
+        let example: String = DEFAULT_CONFIG
+            .lines()
+            .skip_while(|l| !l.starts_with("# [[rule]]"))
+            .take_while(|l| l.starts_with("# "))
+            .map(|l| format!("{}\n", &l[2..]))
+            .collect();
+        assert!(example.contains("source_host"), "{example}");
+        let cfg = Config::parse(&example).unwrap();
+        let rules = RuleSet::compile(&cfg.rules).unwrap();
+        let f = from(
+            "tool.zip",
+            Some("https://objects.githubusercontent.com/a"),
+            None,
+        );
+        assert_eq!(matched(&rules, &f), Some("GitHub downloads"));
     }
 }

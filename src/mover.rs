@@ -320,7 +320,7 @@ mod tests {
         let planned = PlannedMove {
             source: src.clone(),
             dest_dir: dest.clone(),
-            reason: Reason::Rule("Images".into()),
+            reason: Reason::rule("Images"),
         };
         let got = move_logged(&j, run, &planned).unwrap();
         assert_eq!(got, dest.join("p (1).png"));

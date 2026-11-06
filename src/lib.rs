@@ -21,3 +21,4 @@ pub mod tray;
 pub mod undo;
 pub mod watch;
 pub mod win;
+pub mod zone;

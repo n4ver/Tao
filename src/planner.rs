@@ -290,6 +290,45 @@ mod tests {
         }
     }
 
+    /// A real browser-style Zone.Identifier stream, end to end: the source
+    /// rule matches and the planned move's reason names the URL (that text
+    /// is what dry-run prints and the move log stores).
+    #[cfg(windows)]
+    #[test]
+    fn source_host_rule_matches_a_real_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (from_gh, plain) = (root.join("tool.zip"), root.join("other.zip"));
+        fs::write(&from_gh, b"zip").unwrap();
+        fs::write(&plain, b"zip").unwrap();
+        let mut stream = from_gh.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        fs::write(
+            &stream,
+            "[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://github.com/o/r/releases\r\n\
+             HostUrl=https://objects.githubusercontent.com/asset\r\n",
+        )
+        .unwrap();
+        let toml = "[[rule]]\nname='GitHub'\nsource_host=['githubusercontent.com']\ndest='GitHub'\n\
+                    [[rule]]\nname='Archives'\nextensions=['zip']\ndest='Archives'";
+        let p = planner(root, toml);
+        let now = SystemTime::now();
+        match p.evaluate(&from_gh, now).unwrap() {
+            Evaluation::Move(m) => {
+                assert_eq!(m.dest_dir, root.join("GitHub"));
+                assert_eq!(
+                    m.reason.to_string(),
+                    "rule \"GitHub\" (source https://objects.githubusercontent.com/asset)"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        match p.evaluate(&plain, now).unwrap() {
+            Evaluation::Move(m) => assert_eq!(m.reason.to_string(), "rule \"Archives\""),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn hidden_files_are_skipped() {

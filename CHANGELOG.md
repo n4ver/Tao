@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Rule conditions `min_size` and `max_size` (`"20KB"`, `"1.5GB"`; binary
+  units, 1 KB = 1024 bytes, inclusive bounds).
+- Rule conditions `source_url` (regex) and `source_host` (site or any
+  subdomain), matched against the download URL and referring page that
+  browsers record in the file's `Zone.Identifier` stream. The stream is only
+  read for rules that use them. Dry-run output and the move log show the
+  URL that matched.
 - MIT license, this changelog, a minimum supported Rust version
   (`rust-version = "1.90"`) and Dependabot updates for Cargo and GitHub Actions.
 - CI runs on Ubuntu too (build, clippy, tests of the non-Windows fallbacks),

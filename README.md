@@ -135,6 +135,17 @@ older_than = "30d"
 dest = 'D:\Paperwork\Invoices'
 
 [[rule]]
+name = "Big videos"
+extensions = ["mp4", "mkv"]
+min_size = "1.5GB"
+dest = 'D:\Videos'
+
+[[rule]]
+name = "GitHub downloads"
+source_host = ["github.com", "githubusercontent.com"]
+dest = "GitHub"
+
+[[rule]]
 name = "Images"
 extensions = ["jpg", "jpeg", "png", "gif", "webp"]
 dest = "Images"
@@ -153,9 +164,42 @@ How rules work:
   | `regex`      | the regular expression matches the file name         | `'^scan\d+'`        |
   | `older_than` | last modified more than this long ago                | `"30d"`             |
   | `newer_than` | last modified less than this long ago                | `"2h"`              |
+  | `min_size`   | the file is at least this big                        | `"500MB"`           |
+  | `max_size`   | the file is at most this big                         | `"20KB"`            |
+  | `source_url` | the regex matches the URL it was downloaded from, or the page that linked to it | `'github\.com/.*/releases'` |
+  | `source_host`| it was downloaded from one of these sites or a subdomain of them | `["github.com"]` |
 
-  Durations use `s`, `m`, `h`, `d` or `w`. All name matching is
+  Durations use `s`, `m`, `h`, `d` or `w`. All name and URL matching is
   case-insensitive, like Windows file names.
+
+  **Sizes** use `B`, `KB`, `MB`, `GB` or `TB` (any case; `KiB`, `MiB`, ...
+  also work). They are *binary* units, 1 KB = 1024 bytes, because that is
+  what Explorer's Size column shows, so `"500MB"` means what Explorer
+  calls 500 MB. Fractions are fine (`"1.5GB"`), a unit is required, and
+  both limits are inclusive. A rule with `min_size` larger than `max_size`
+  is rejected.
+
+  **Download source** comes from the `Zone.Identifier` that browsers attach to
+  downloaded files on NTFS (the same data behind "this file came from another
+  computer"). It holds the URL the file was fetched from (`HostUrl`) and
+  usually the page that linked to it (`ReferrerUrl`); both are checked.
+  `source_host = ["github.com"]` matches `github.com` and any subdomain such
+  as `objects.github.com`, but not `notgithub.com`. Give host names only (no
+  `https://`, path or port). Files without that information (copied from a
+  USB stick, saved by non-browser programs, private-mode downloads that
+  record only `about:internet`, non-NTFS drives) never match a source
+  condition. The source is only read for rules that use these conditions,
+  and only after the rule's other conditions have matched. `tao sort
+  --dry-run` and the move log show which URL matched:
+
+  ```
+  tool.zip  ->  GitHub\   [rule "GitHub downloads" (source https://objects.githubusercontent.com/...)]
+  ```
+
+  GitHub release downloads come from `objects.githubusercontent.com` with
+  `github.com` as the referring page, so `source_host = ["github.com"]` alone
+  usually matches them through the referrer; listing `githubusercontent.com`
+  too also covers downloads where the browser recorded no referrer.
 - `dest` is relative to the sorted folder unless it's an absolute path.
   Use single quotes (`'D:\Paperwork'`) for Windows paths so backslashes aren't
   treated as escapes.
@@ -225,7 +269,8 @@ throwaway key under `HKCU\Software\tao-test-<pid>`, never the real
 | Module          | Role                                                              |
 |-----------------|-------------------------------------------------------------------|
 | `config.rs`     | TOML schema and the default config                                |
-| `facts.rs`      | What is known about a file (name, size, age, attributes)          |
+| `facts.rs`      | What is known about a file (name, size, age, attributes, lazily its source) |
+| `zone.rs`       | Parsing the `Zone.Identifier` stream, host matching               |
 | `rules.rs`      | Compiles rules, first-match evaluation                            |
 | `classify.rs`   | Rules, then pluggable `Classifier` fallbacks, then `fallback_dest`|
 | `planner.rs`    | Skip logic, turns folder contents into planned moves              |
@@ -249,11 +294,10 @@ regenerates it.
 
 ### Extension points
 
-- **Match on download source (Zone.Identifier).** Browsers record where a
-  file came from in an NTFS alternate data stream, `file.zip:Zone.Identifier`
-  (`HostUrl=...`). To match on it, add a lazily-read field to `FileFacts` and
-  a `Condition::SourceUrl(Regex)` variant in `rules.rs`; see the comment on
-  `FileFacts`.
+- **New rule conditions.** Add a variant to `Condition` in `rules.rs` and
+  the fact it needs to `FileFacts`. Facts that cost a disk read should be
+  lazy (a `OnceCell`, like the Zone.Identifier source), and their conditions
+  compiled after the cheap ones.
 - **Content classifier.** Implement `classify::Classifier` and register it
   with `Engine::with_fallback`. It is only asked about files no rule matched,
   and its answer is logged as the move's reason.

@@ -36,8 +36,24 @@ fallback_dest = "Other"
 #   regex      = '^invoice[-_ ]\d+'  regular expression on the file name (any case)
 #   older_than = "30d"               last modified more than this long ago (s, m, h, d, w)
 #   newer_than = "1h"                last modified less than this long ago
+#   min_size   = "500MB"             at least this big (B, KB, MB, GB, TB; 1 KB = 1024 bytes)
+#   max_size   = "20KB"              at most this big; fractions like "1.5GB" are fine
+#   source_url = 'github\.com/.*/releases'
+#                                    regex on the download's source or referring page
+#                                    (from the Zone.Identifier browsers attach; any case)
+#   source_host = ["github.com"]     downloaded from this site or a subdomain of it
+#                                    (github.com also matches objects.github.com)
 # `dest` is a folder. Relative paths are relative to the sorted folder;
 # absolute paths (e.g. 'D:\Archive') are used as they are.
+
+# Example: keep GitHub release downloads together. Release assets are served
+# from githubusercontent.com with github.com as the referring page, so list
+# both. To enable it, uncomment the four lines (it is above the general
+# rules, so it wins).
+# [[rule]]
+# name = "GitHub downloads"
+# source_host = ["github.com", "githubusercontent.com"]
+# dest = "GitHub"
 
 [[rule]]
 name = "Installers"
@@ -99,6 +115,11 @@ pub struct RuleConfig {
     pub regex: Option<String>,
     pub older_than: Option<String>,
     pub newer_than: Option<String>,
+    pub min_size: Option<String>,
+    pub max_size: Option<String>,
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub source_host: Vec<String>,
 }
 
 fn default_stable_seconds() -> u64 {

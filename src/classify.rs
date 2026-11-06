@@ -25,7 +25,11 @@ pub trait Classifier: Send + Sync {
 /// Why a file is going where it is going.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
-    Rule(String),
+    Rule {
+        name: String,
+        /// The download URL a `source_url`/`source_host` condition matched.
+        source: Option<String>,
+    },
     Classifier(String),
     Fallback,
 }
@@ -33,9 +37,25 @@ pub enum Reason {
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Reason::Rule(name) => write!(f, "rule \"{name}\""),
+            Reason::Rule { name, source } => {
+                write!(f, "rule \"{name}\"")?;
+                match source {
+                    Some(url) => write!(f, " (source {url})"),
+                    None => Ok(()),
+                }
+            }
             Reason::Classifier(name) => write!(f, "classifier \"{name}\""),
             Reason::Fallback => f.write_str("no rule matched"),
+        }
+    }
+}
+
+impl Reason {
+    /// A rule match without a source, e.g. `Reason::rule("Images")`.
+    pub fn rule(name: &str) -> Self {
+        Reason::Rule {
+            name: name.to_string(),
+            source: None,
         }
     }
 }
@@ -76,7 +96,10 @@ impl Engine {
         if let Some(rule) = self.rules.first_match(facts, now) {
             return Decision {
                 dest: rule.dest.clone(),
-                reason: Reason::Rule(rule.name.clone()),
+                reason: Reason::Rule {
+                    name: rule.name.clone(),
+                    source: rule.matched_source(facts),
+                },
             };
         }
         for c in &self.fallbacks {
@@ -119,7 +142,7 @@ mod tests {
         let decide = |name| engine.decide(&FileFacts::fake(name, now), now);
 
         // A rule match wins even if the classifier would also have matched.
-        assert_eq!(decide("tax.pdf").reason, Reason::Rule("Docs".into()));
+        assert_eq!(decide("tax.pdf").reason, Reason::rule("Docs"));
         let d = decide("tax-2025.xyz");
         assert_eq!(d.reason, Reason::Classifier("tax-detector".into()));
         assert_eq!(d.dest, PathBuf::from("Taxes"));
