@@ -18,15 +18,14 @@ Downloads\
 ## Safety guarantees
 
 - **Files are only ever moved, never deleted.** Nothing in the code removes a
-  file. (A move to another drive is a copy followed by Windows removing the
-  original, done by `MoveFileExW` after the copy has been flushed to disk.)
-- **None of your files is overwritten.** If `Documents\report.pdf` exists,
+  file.
+    - A move to another drive is a copy followed by Windows removing the
+  original, done by `MoveFileExW` after the copy has been flushed to disk.
+- **None of your files are overwritten.** If `Documents\report.pdf` exists,
   the file becomes `Documents\report (1).pdf`. This is enforced by Windows
   itself, not by checking first: the rename is made with `MoveFileExW`
   *without* `MOVEFILE_REPLACE_EXISTING`, which fails atomically if the name
-  is taken. (The one thing Tao does replace is its own program files:
-  `tao install` copies `tao.exe` and `taow.exe` over the previous copies in
-  `%LOCALAPPDATA%\Programs\Tao\`, and refuses if one of them is running.)
+  is taken.
 - **Every move is logged to SQLite before it happens,** so `undo` works even
   if the program is killed mid-move.
 - **Partial downloads are never touched:** `.crdownload` (Chrome/Edge), `.part`
@@ -58,8 +57,12 @@ the Windows SDK, which the MSVC build tools include.
 
 | File          | What it is                                                    |
 |---------------|---------------------------------------------------------------|
-| `tao.exe`     | The command-line tool. Use this for everything.               |
-| `taow.exe`    | The background watcher with a tray icon and no console window. `install` registers it to start at sign-in. |
+| `tao.exe`     | The command-line tool.           |
+| `taow.exe`    | Background watcher with a tray icon. `install` registers it to start at sign-in. |
+
+## Installation
+
+Grab the latest executable from the latest release, and run `tao install`.
 
 ## Usage
 
@@ -80,23 +83,16 @@ tao config             # open the rules file in your editor
 tao -v <command>       # with debug output
 ```
 
-`install` copies `tao.exe` and `taow.exe` to `%LOCALAPPDATA%\Programs\Tao\`
-(the per-user equivalent of Program Files, no admin rights needed), replacing
-older copies there. If the installed watcher is running, nothing is copied and
-you are asked to quit it first (tray icon > Quit). It then writes the value
-`Tao` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing at
-the installed `taow.exe`, so rebuilding or moving the files you installed from
-no longer affects startup. Add that folder to your `PATH` to run `tao` from
-any terminal; `install` tells you if it isn't there yet, but doesn't change
-`PATH` itself.
+`install` copies `tao.exe` and `taow.exe` to `%LOCALAPPDATA%\Programs\Tao\`, replacing
+older copies there (Unless a previously installed watcher is currently running).
+It then writes the value `Tao` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`,
+pointing at the installed `taow.exe`. Add that folder to your `PATH` to run 
+`tao` from any terminal; `install` tells you if it isn't there yet, but doesn't 
+change `PATH` itself.
 
 The entry shows up in Task Manager > Startup apps, where it can also be
-disabled. Windows records that separately, so writing the Run value again
-doesn't re-enable it; `install` checks and tells you if the entry is disabled
-there, without changing it. (Task Manager stores this as a binary value named
-`Tao` under `HKCU\...\Explorer\StartupApproved\Run`: its first byte is `02`
-when enabled and `03` when disabled, followed by the time it was disabled.
-Tao only reads it.)
+disabled. `install` checks and tells you if the entry is disabled
+there, without changing it.
 
 `uninstall` removes the Run value and leaves the installed files in place;
 an already-running watcher keeps going until you sign out or end `taow.exe` in
