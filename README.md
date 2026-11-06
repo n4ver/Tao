@@ -1,3 +1,5 @@
+<img align="center" src=https://github.com/n4ver/Tao/blob/master/assets/tao.ico></img>
+
 # Tao
 
 [![CI](https://github.com/n4ver/Tao/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/n4ver/Tao/actions/workflows/ci.yml)
