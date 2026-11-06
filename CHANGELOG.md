@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
 ### Added
 
 - Rule conditions `min_size` and `max_size` (`"20KB"`, `"1.5GB"`; binary
@@ -87,11 +89,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (with `--last N`), `tao install` / `uninstall` and `tao config`.
 - TOML rules with `extensions`, `glob`, `regex`, `older_than` and
   `newer_than` conditions; first match wins.
-- No-overwrite moves with ` (N)` suffixes, a SQLite move log written before
+- No-overwrite moves with `name (N).ext` suffixes, a SQLite move log written before
   each move, and skipping of partial downloads, hidden files and locked files.
 - CI workflow (fmt, clippy, tests on Windows).
 
-[Unreleased]: https://github.com/n4ver/Tao/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/n4ver/Tao/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/n4ver/Tao/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/n4ver/Tao/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/n4ver/Tao/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/n4ver/Tao/compare/v0.1.0...v0.1.1
