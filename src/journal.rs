@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, params};
 
 const SCHEMA_VERSION: i32 = 1;
@@ -46,7 +47,7 @@ pub enum Status {
 }
 
 impl Status {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Status::Pending => "pending",
             Status::Done => "done",
@@ -85,6 +86,30 @@ pub struct NewMove<'a> {
     pub size: u64,
     pub mtime: SystemTime,
     pub reason: &'a str,
+}
+
+/// A full move-log row, for `tao log`.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub id: i64,
+    pub run_id: i64,
+    pub moved_at: SystemTime,
+    pub source: PathBuf,
+    pub dest: PathBuf,
+    pub reason: String,
+    pub status: Status,
+    pub error: Option<String>,
+    pub undone_to: Option<PathBuf>,
+}
+
+/// What [`Journal::prune`] deleted (or, in a dry run, would delete).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PruneReport {
+    pub failed: usize,
+    pub undone: usize,
+    /// Old `undone` rows kept because the restored file is still in place.
+    pub kept_restored: usize,
+    pub runs: usize,
 }
 
 pub struct Journal {
@@ -268,6 +293,106 @@ impl Journal {
             .is_some())
     }
 
+    /// The `limit` most recent log entries of any status, newest first.
+    pub fn history(&self, limit: u32) -> Result<Vec<LogEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, run_id, moved_at, source, dest, reason, status, error, undone_to
+             FROM moves ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            let status = r.get::<_, String>(6)?;
+            Ok(LogEntry {
+                id: r.get(0)?,
+                run_id: r.get(1)?,
+                moved_at: from_unix_ms(r.get(2)?),
+                source: r.get::<_, String>(3)?.into(),
+                dest: r.get::<_, String>(4)?.into(),
+                reason: r.get(5)?,
+                status: Status::parse(&status).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(6, Type::Text, e.into())
+                })?,
+                error: r.get(7)?,
+                undone_to: r.get::<_, Option<String>>(8)?.map(PathBuf::from),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Deletes log entries that neither `undo` nor the watcher can still
+    /// need, for `tao log --prune`. All of it happens in one transaction;
+    /// with `dry_run` the transaction is rolled back, so the report says
+    /// exactly what a real run would have done.
+    ///
+    /// What is deleted (only rows that finished before `cutoff`):
+    ///
+    /// - `failed` moves (`moved_at` before the cutoff). Undo only ever
+    ///   selects `done` and `pending` rows, and [`Self::was_restored_by_undo`]
+    ///   only reads `undone` ones, so nothing consults these.
+    /// - `undone` moves (`undone_at` before the cutoff) whose file is no
+    ///   longer at `undone_to` with the logged size and modified time. Those
+    ///   are exactly the rows for which `was_restored_by_undo` already returns
+    ///   false. A row whose restored file is still sitting there unchanged is
+    ///   what keeps the watcher from sorting it again, so it is kept, however
+    ///   old.
+    /// - `runs` with no moves left that started before the cutoff, except the
+    ///   newest run (a watcher may have just created it and be about to log
+    ///   into it).
+    ///
+    /// `done` and `pending` rows are never deleted: they are what `tao undo`,
+    /// `undo --last` and the tray's recent-moves list work from, and pending
+    /// rows still need undo's check of the disk.
+    pub fn prune(&self, cutoff: SystemTime, dry_run: bool) -> Result<PruneReport> {
+        // IMMEDIATE takes the write lock up front, so the disk checks below
+        // can't race with the watcher marking more rows undone. The busy
+        // timeout set in `init` makes this wait for a running watcher.
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let cutoff = unix_ms(cutoff);
+        let mut report = PruneReport {
+            failed: tx.execute(
+                "DELETE FROM moves WHERE status = 'failed' AND moved_at < ?1",
+                params![cutoff],
+            )?,
+            ..PruneReport::default()
+        };
+
+        for row in undone_before(&tx, cutoff)? {
+            if row.protects_its_file() {
+                report.kept_restored += 1;
+            } else {
+                tx.execute("DELETE FROM moves WHERE id = ?1", params![row.id])?;
+                report.undone += 1;
+            }
+        }
+
+        report.runs = tx.execute(
+            "DELETE FROM runs
+             WHERE started_at < ?1
+               AND id <> (SELECT MAX(id) FROM runs)
+               AND NOT EXISTS (SELECT 1 FROM moves WHERE moves.run_id = runs.id)",
+            params![cutoff],
+        )?;
+
+        if dry_run {
+            tx.rollback()?;
+        } else {
+            tx.commit()?;
+        }
+        Ok(report)
+    }
+
+    /// Rebuilds the database file to give the space freed by pruning back to
+    /// the file system. Must run outside a transaction.
+    pub fn vacuum(&self) -> Result<()> {
+        // In WAL mode VACUUM writes the new pages to the -wal file; the
+        // TRUNCATE checkpoint copies them back and shrinks the -wal to zero.
+        self.conn
+            .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
     pub fn get(&self, id: i64) -> Result<MoveRecord> {
         self.query("WHERE id = ?1", params![id])?
             .pop()
@@ -301,6 +426,52 @@ impl Journal {
             })
         })
         .collect()
+    }
+}
+
+/// The parts of an `undone` row that decide whether it can be pruned.
+struct UndoneRow {
+    id: i64,
+    undone_to: Option<String>,
+    size: u64,
+    mtime_ms: i64,
+}
+
+impl UndoneRow {
+    /// Whether the watcher may still rely on this row (see [`still_restored`]).
+    fn protects_its_file(&self) -> bool {
+        self.undone_to
+            .as_deref()
+            .is_some_and(|p| still_restored(Path::new(p), self.size, self.mtime_ms))
+    }
+}
+
+/// `undone` rows that finished before `cutoff`.
+fn undone_before(conn: &Connection, cutoff: i64) -> Result<Vec<UndoneRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, undone_to, size, mtime FROM moves
+         WHERE status = 'undone' AND undone_at < ?1",
+    )?;
+    let rows = stmt.query_map(params![cutoff], |r| {
+        Ok(UndoneRow {
+            id: r.get(0)?,
+            undone_to: r.get(1)?,
+            size: r.get::<_, i64>(2)? as u64,
+            mtime_ms: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// True if the file undo put back is still at `path` and unchanged: the
+/// same test [`Journal::was_restored_by_undo`] applies, so a row passing it
+/// is one the watcher still relies on. If the file can't be checked for any
+/// reason other than "not found", it counts as still there: when unsure,
+/// keep the row.
+fn still_restored(path: &Path, size: u64, mtime_ms: i64) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => m.len() == size && m.modified().is_ok_and(|t| unix_ms(t) == mtime_ms),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
@@ -364,5 +535,193 @@ mod tests {
         assert_eq!(from_unix_ms(unix_ms(t)), t);
         let before = UNIX_EPOCH - Duration::from_millis(5);
         assert_eq!(from_unix_ms(unix_ms(before)), before);
+    }
+
+    const HOUR: Duration = Duration::from_secs(3600);
+
+    /// A cutoff after everything in the test log, so age never protects a row.
+    fn future() -> SystemTime {
+        SystemTime::now() + HOUR
+    }
+
+    /// Logs a move of a real file and marks it undone, as `undo` would after
+    /// putting it back at `restored`.
+    fn undone_real(j: &Journal, run: i64, restored: &Path) -> i64 {
+        std::fs::write(restored, "restored").unwrap();
+        let meta = std::fs::metadata(restored).unwrap();
+        let id = j
+            .record_pending(&NewMove {
+                run_id: run,
+                source: restored,
+                dest: Path::new("dest/x"),
+                size: meta.len(),
+                mtime: meta.modified().unwrap(),
+                reason: "test",
+            })
+            .unwrap();
+        j.mark_done(id).unwrap();
+        j.mark_undone(id, restored).unwrap();
+        id
+    }
+
+    fn restored_still_protected(j: &Journal, path: &Path) -> bool {
+        let meta = std::fs::metadata(path).unwrap();
+        j.was_restored_by_undo(path, meta.len(), meta.modified().unwrap())
+            .unwrap()
+    }
+
+    fn ids(j: &Journal) -> Vec<i64> {
+        j.history(100).unwrap().into_iter().map(|e| e.id).collect()
+    }
+
+    #[test]
+    fn history_shows_every_status_newest_first() {
+        let j = Journal::open_in_memory().unwrap();
+        let run = j.begin_run("sort").unwrap();
+        let (a, b, c) = (
+            record(&j, run, "a"),
+            record(&j, run, "b"),
+            record(&j, run, "c"),
+        );
+        j.mark_done(a).unwrap();
+        j.mark_failed(b, "locked").unwrap();
+        j.mark_undone(c, Path::new("c")).unwrap();
+        let h = j.history(10).unwrap();
+        assert_eq!(h.iter().map(|e| e.id).collect::<Vec<_>>(), [c, b, a]);
+        assert_eq!(h[0].status, Status::Undone);
+        assert_eq!(h[0].undone_to.as_deref(), Some(Path::new("c")));
+        assert_eq!(h[1].error.as_deref(), Some("locked"));
+        assert_eq!(h[2].reason, "test");
+        assert_eq!(j.history(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn prune_removes_failed_and_keeps_done_and_pending_at_any_age() {
+        let j = Journal::open_in_memory().unwrap();
+        let run = j.begin_run("sort").unwrap();
+        let done = record(&j, run, "done");
+        j.mark_done(done).unwrap();
+        let pending = record(&j, run, "pending");
+        let failed = record(&j, run, "failed");
+        j.mark_failed(failed, "locked").unwrap();
+
+        let report = j.prune(future(), false).unwrap();
+        assert_eq!(report.failed, 1);
+        assert_eq!(ids(&j), [pending, done]);
+        // Undo still sees both.
+        let undoable: Vec<_> = j.last_run_moves().unwrap().iter().map(|m| m.id).collect();
+        assert_eq!(undoable, [pending, done]);
+    }
+
+    #[test]
+    fn prune_respects_the_age_cutoff() {
+        let j = Journal::open_in_memory().unwrap();
+        let run = j.begin_run("sort").unwrap();
+        let failed = record(&j, run, "f");
+        j.mark_failed(failed, "x").unwrap();
+        j.mark_undone(record(&j, run, "u"), Path::new("gone"))
+            .unwrap();
+        let report = j.prune(SystemTime::now() - HOUR, false).unwrap();
+        assert_eq!(report, PruneReport::default());
+        assert_eq!(ids(&j).len(), 2);
+    }
+
+    /// The watcher's "don't re-sort what undo put back" check must keep
+    /// working: an undone row whose file is still in place unchanged stays.
+    #[test]
+    fn prune_keeps_undone_rows_the_watcher_still_relies_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open_in_memory().unwrap();
+        let run = j.begin_run("sort").unwrap();
+        let unchanged = dir.path().join("unchanged.pdf");
+        let edited = dir.path().join("edited.pdf");
+        let moved_away = dir.path().join("moved.pdf");
+        let keep = undone_real(&j, run, &unchanged);
+        undone_real(&j, run, &edited);
+        undone_real(&j, run, &moved_away);
+        std::fs::write(&edited, "edited since, and longer").unwrap();
+        std::fs::rename(&moved_away, dir.path().join("elsewhere.pdf")).unwrap();
+
+        let report = j.prune(future(), false).unwrap();
+        assert_eq!(report.undone, 2);
+        assert_eq!(report.kept_restored, 1);
+        assert_eq!(ids(&j), [keep]);
+        assert!(restored_still_protected(&j, &unchanged));
+
+        // Once that file changes too, the next prune removes the row.
+        std::fs::write(&unchanged, "now edited as well").unwrap();
+        assert_eq!(j.prune(future(), false).unwrap().undone, 1);
+        assert!(ids(&j).is_empty());
+    }
+
+    #[test]
+    fn dry_run_reports_the_same_counts_and_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = Journal::open_in_memory().unwrap();
+        let old_run = j.begin_run("sort").unwrap();
+        let f = record(&j, old_run, "f");
+        j.mark_failed(f, "x").unwrap();
+        undone_real(&j, old_run, &dir.path().join("kept.txt"));
+        j.mark_undone(record(&j, old_run, "u"), Path::new("missing"))
+            .unwrap();
+        j.begin_run("watch").unwrap();
+        let before = ids(&j);
+
+        let dry = j.prune(future(), true).unwrap();
+        assert_eq!(ids(&j), before);
+        let real = j.prune(future(), false).unwrap();
+        assert_eq!(dry, real);
+        assert_eq!(
+            real,
+            PruneReport {
+                failed: 1,
+                undone: 1,
+                kept_restored: 1,
+                runs: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn prune_removes_empty_old_runs_but_never_the_newest() {
+        let j = Journal::open_in_memory().unwrap();
+        let emptied = j.begin_run("sort").unwrap();
+        let f = record(&j, emptied, "f");
+        j.mark_failed(f, "x").unwrap();
+        let with_done = j.begin_run("sort").unwrap();
+        j.mark_done(record(&j, with_done, "d")).unwrap();
+        let newest = j.begin_run("watch").unwrap();
+
+        let report = j.prune(future(), false).unwrap();
+        assert_eq!(report.runs, 1, "only the emptied run goes");
+        // The newest (empty) run is still usable: the foreign key holds.
+        let id = record(&j, newest, "late");
+        j.mark_done(id).unwrap();
+        assert_eq!(j.last_run_moves().unwrap()[0].id, id);
+        let gone = j.conn.execute(
+            "INSERT INTO moves (run_id, moved_at, source, dest, size, mtime, reason, status)
+             VALUES (?1, 0, 'a', 'b', 0, 0, 'r', 'done')",
+            params![emptied],
+        );
+        assert!(gone.is_err(), "the pruned run must really be gone");
+    }
+
+    #[test]
+    fn vacuum_after_prune_keeps_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("moves.db");
+        let j = Journal::open(&path).unwrap();
+        let run = j.begin_run("sort").unwrap();
+        for i in 0..200 {
+            let id = record(&j, run, &format!("file-{i}-{}", "x".repeat(200)));
+            j.mark_failed(id, "locked").unwrap();
+        }
+        let keep = record(&j, run, "keep");
+        j.mark_done(keep).unwrap();
+        assert_eq!(j.prune(future(), false).unwrap().failed, 200);
+        j.vacuum().unwrap();
+        drop(j);
+        let j = Journal::open(&path).unwrap();
+        assert_eq!(ids(&j), [keep]);
     }
 }

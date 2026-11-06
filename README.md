@@ -60,6 +60,9 @@ tao sort --dry-run     # show what would be moved, change nothing
 tao sort               # sort everything currently in Downloads
 tao undo               # put back everything moved by the last run
 tao undo --last 3      # put back the 3 most recent moves, across runs
+tao log                # show the last 20 entries of the move log (--limit N for more)
+tao log --prune --older-than 90d --dry-run   # how many old entries could go
+tao log --prune --older-than 90d --vacuum    # remove them and compact the file
 tao watch              # run the watcher from this terminal, with a tray icon
 tao watch --headless   # ...without the tray icon (Ctrl+C to stop)
 tao install            # start the watcher (taow.exe) at every sign-in, and start it now
@@ -238,6 +241,23 @@ unchanged; otherwise undoing would just trigger another move.
 If the program was killed between logging a move and making it, the log
 entry is left "pending"; undo checks the disk, sees the file never moved, and
 closes the entry.
+
+### Pruning the log
+
+The log only grows on its own. `tao log --prune --older-than <duration>`
+removes entries that finished longer ago than that and that nothing needs
+any more:
+
+- **failed** moves (the file was never moved);
+- **undone** moves whose file is no longer where undo put it, unchanged.
+
+It never removes a move that can still be undone (`done`, or `pending`
+after a crash), whatever its age. It also keeps an undone move for as long as
+its file is still sitting where undo put it with the same size and modified
+time, because that entry is what stops the watcher from sorting the file
+again. Runs left with no entries are removed too. `--dry-run` reports the
+exact counts without changing anything (the prune runs and is rolled back),
+and `--vacuum` compacts the database file afterwards.
 
 The log is a plain SQLite database, so you can inspect it with any SQLite tool:
 

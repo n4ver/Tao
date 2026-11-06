@@ -221,6 +221,34 @@ mod tests {
         assert_eq!(f.journal.last_run_moves().unwrap().len(), 2);
     }
 
+    /// Real sort → undo → prune: files undo put back stay protected from the
+    /// watcher, and moves that weren't undone stay undoable.
+    #[test]
+    fn prune_after_undo_keeps_undo_and_watcher_protection_working() {
+        let f = fixture();
+        f.sort(&[("old.pdf", "Documents")]);
+        f.sort(&[("back.png", "Images")]);
+        undo(&f.journal, &f.journal.last_run_moves().unwrap());
+        let back = f.root.join("back.png");
+        let meta = fs::metadata(&back).unwrap();
+
+        let cutoff = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let report = f.journal.prune(cutoff, false).unwrap();
+        assert_eq!((report.undone, report.kept_restored), (0, 1));
+        assert!(
+            f.journal
+                .was_restored_by_undo(&back, meta.len(), meta.modified().unwrap())
+                .unwrap()
+        );
+        let recs = f.journal.last_run_moves().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert!(matches!(
+            undo(&f.journal, &recs)[0].1,
+            UndoOutcome::Restored(_)
+        ));
+        assert!(f.root.join("old.pdf").exists());
+    }
+
     #[test]
     fn interrupted_pending_move_is_detected() {
         let f = fixture();

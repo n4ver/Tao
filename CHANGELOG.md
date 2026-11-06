@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   browsers record in the file's `Zone.Identifier` stream. The stream is only
   read for rules that use them. Dry-run output and the move log show the
   URL that matched.
+- `tao log` shows recent move-log entries (`--limit N`), and
+  `tao log --prune --older-than <duration>` removes failed moves and undone
+  moves that undo and the watcher no longer need, with `--dry-run` and
+  `--vacuum`. Moves that can still be undone are never pruned.
 - MIT license, this changelog, a minimum supported Rust version
   (`rust-version = "1.90"`) and Dependabot updates for Cargo and GitHub Actions.
 - CI runs on Ubuntu too (build, clippy, tests of the non-Windows fallbacks),
