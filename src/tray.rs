@@ -38,13 +38,19 @@ pub fn run_watch(headless: bool) -> Result<()> {
     watch::run_headless()
 }
 
+// The helpers below are pure so they can be tested on any platform, but
+// only the Windows tray (`imp`) calls them, hence the dead-code allowances.
+
 /// Longest tooltip Windows shows: `NOTIFYICONDATAW::szTip` holds 128 UTF-16
 /// units including the terminating NUL.
+#[cfg_attr(not(windows), allow(dead_code))]
 const TOOLTIP_MAX_UTF16: usize = 127;
 /// Keep menu entries a readable width.
+#[cfg_attr(not(windows), allow(dead_code))]
 const MENU_LABEL_MAX_CHARS: usize = 60;
 
 /// Truncates to at most `max` UTF-16 code units, adding "…" when cut.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn clip_utf16(s: &str, max: usize) -> String {
     if s.encode_utf16().count() <= max {
         return s.to_string();
@@ -62,6 +68,7 @@ fn clip_utf16(s: &str, max: usize) -> String {
     out
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn tooltip_text(status: Option<&str>, paused: bool) -> String {
     let title = if paused { "Tao (paused)" } else { "Tao" };
     let text = match status {
@@ -74,6 +81,7 @@ fn tooltip_text(status: Option<&str>, paused: bool) -> String {
 /// "report.pdf → Documents", shortened, with `&` escaped: Windows menus
 /// treat `&x` as "underline x as the keyboard shortcut", and `&&` is a
 /// literal ampersand.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn menu_label(m: &RecentMove) -> String {
     let name: String = if m.file_name.chars().count() > MENU_LABEL_MAX_CHARS {
         let mut s: String = m.file_name.chars().take(MENU_LABEL_MAX_CHARS - 1).collect();
@@ -86,6 +94,7 @@ fn menu_label(m: &RecentMove) -> String {
 }
 
 /// The status line shown before anything happens in this session.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn initial_status(recent: &[RecentMove]) -> Option<String> {
     recent
         .first()
@@ -93,6 +102,7 @@ fn initial_status(recent: &[RecentMove]) -> Option<String> {
 }
 
 /// A faded, greyscale copy of an RGBA image, used as the icon while paused.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn greyed(rgba: &[u8]) -> Vec<u8> {
     rgba.as_chunks::<4>()
         .0

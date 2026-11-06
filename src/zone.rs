@@ -73,7 +73,12 @@ pub fn parse(bytes: &[u8]) -> Option<ZoneInfo> {
 /// `Set-Content` may write UTF-16 with a byte-order mark.
 fn decode(bytes: &[u8]) -> String {
     let utf16 = |rest: &[u8], from: fn([u8; 2]) -> u16| {
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| from([c[0], c[1]])).collect();
+        let units: Vec<u16> = rest
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| from([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&units)
     };
     match bytes {
