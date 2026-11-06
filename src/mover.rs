@@ -99,12 +99,14 @@ pub fn suffixed_name(name: &OsStr, n: u32) -> std::ffi::OsString {
 /// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` and silently overwrites.
 #[cfg(windows)]
 pub fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
-    use crate::win::wide;
+    use crate::win::wide_path;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
-    let (src_w, dst_w) = (wide(src), wide(dst));
+    // `wide_path` adds the `\\?\` prefix to paths over MAX_PATH so they
+    // work whether or not long paths are enabled in Windows.
+    let (src_w, dst_w) = (wide_path(src), wide_path(dst));
 
     // Without MOVEFILE_REPLACE_EXISTING the call fails with
     // ERROR_ALREADY_EXISTS / ERROR_FILE_EXISTS if `dst` exists, and the
@@ -116,8 +118,6 @@ pub fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     // the copy to disk before removing the source. If the copy fails, the
     // source is left untouched.
     //
-    // Paths are limited to MAX_PATH (260 chars) unless long paths are enabled
-    // system-wide; Downloads paths are normally far shorter.
     // SAFETY: both strings are NUL-terminated and live until the call returns.
     let ok = unsafe {
         MoveFileExW(
@@ -346,6 +346,51 @@ mod tests {
             move_logged(&j, run, &planned),
             Err(MoveFailure::Gone)
         ));
+    }
+
+    /// Destinations (and sources) longer than MAX_PATH (260 characters)
+    /// must work even if long paths are not enabled in Windows.
+    #[test]
+    fn paths_longer_than_max_path_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().to_path_buf();
+        while deep.as_os_str().len() < 400 {
+            deep.push("a-fairly-long-folder-name-to-exceed-max-path");
+        }
+        let name = format!("{}.pdf", "long-file-name-".repeat(8));
+        let src = dir.path().join(&name);
+        fs::write(&src, "deep").unwrap();
+        // A file already there forces the collision path too.
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join(&name), "taken").unwrap();
+
+        let got = move_into(&src, &deep, |_| Ok(())).unwrap();
+        assert!(got.as_os_str().len() > 400);
+        assert_eq!(
+            got.file_name().unwrap(),
+            &*suffixed_name(OsStr::new(&name), 1)
+        );
+        assert_eq!(fs::read_to_string(&got).unwrap(), "deep");
+        assert!(!src.exists());
+
+        // ...and back out again, as undo does.
+        let back = move_as(&got, dir.path(), OsStr::new(&name), |_| Ok(())).unwrap();
+        assert_eq!(back, src);
+        assert_eq!(fs::read_to_string(deep.join(&name)).unwrap(), "taken");
+    }
+
+    /// Config destinations may use `/`; they are joined onto `\` paths.
+    #[test]
+    fn mixed_separators_in_long_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut deep = dir.path().join("Images/Screenshots");
+        while deep.as_os_str().len() < 300 {
+            deep.push("another-long-folder-name-for-the-test");
+        }
+        let src = dir.path().join("shot.png");
+        fs::write(&src, "png").unwrap();
+        let got = move_into(&src, &deep, |_| Ok(())).unwrap();
+        assert_eq!(fs::read_to_string(&got).unwrap(), "png");
     }
 
     /// A file held open without FILE_SHARE_DELETE (as browsers do while

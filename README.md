@@ -20,10 +20,13 @@ Downloads\
 - **Files are only ever moved, never deleted.** Nothing in the code removes a
   file. (A move to another drive is a copy followed by Windows removing the
   original, done by `MoveFileExW` after the copy has been flushed to disk.)
-- **Nothing is overwritten.** If `Documents\report.pdf` exists, the file
-  becomes `Documents\report (1).pdf`. This is enforced by Windows itself, not
-  by checking first: the rename is made with `MoveFileExW` *without*
-  `MOVEFILE_REPLACE_EXISTING`, which fails atomically if the name is taken.
+- **None of your files is overwritten.** If `Documents\report.pdf` exists,
+  the file becomes `Documents\report (1).pdf`. This is enforced by Windows
+  itself, not by checking first: the rename is made with `MoveFileExW`
+  *without* `MOVEFILE_REPLACE_EXISTING`, which fails atomically if the name
+  is taken. (The one thing Tao does replace is its own program files:
+  `tao install` copies `tao.exe` and `taow.exe` over the previous copies in
+  `%LOCALAPPDATA%\Programs\Tao\`, and refuses if one of them is running.)
 - **Every move is logged to SQLite before it happens,** so `undo` works even
   if the program is killed mid-move.
 - **Partial downloads are never touched:** `.crdownload` (Chrome/Edge), `.part`
@@ -46,7 +49,12 @@ cargo build --release
 ```
 
 This produces two executables in `target\release\`. Keep them in the same
-folder; a good permanent home is `%LOCALAPPDATA%\Programs\Tao\`.
+folder. `tao install` copies both to `%LOCALAPPDATA%\Programs\Tao\` (see
+below), so the build folder can be rebuilt or deleted afterwards.
+
+Both carry an icon, version information (Properties > Details) and an
+application manifest. These are compiled in by `build.rs` with `rc.exe` from
+the Windows SDK, which the MSVC build tools include.
 
 | File          | What it is                                                    |
 |---------------|---------------------------------------------------------------|
@@ -65,18 +73,34 @@ tao log --prune --older-than 90d --dry-run   # how many old entries could go
 tao log --prune --older-than 90d --vacuum    # remove them and compact the file
 tao watch              # run the watcher from this terminal, with a tray icon
 tao watch --headless   # ...without the tray icon (Ctrl+C to stop)
-tao install            # start the watcher (taow.exe) at every sign-in, and start it now
+tao install            # install, start the watcher at every sign-in, and start it now
+tao install --in-place # ...registering taow.exe where it is, without copying
 tao uninstall          # remove the sign-in entry
 tao config             # open the rules file in your editor
 tao -v <command>       # with debug output
 ```
 
-`install` writes the value `Tao` under
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, which runs a program at
-sign-in for the current user, with no admin rights needed. It shows up in Task
-Manager > Startup apps, where it can also be disabled. `uninstall` removes the
-value; an already-running watcher keeps going until you sign out or end
-`taow.exe` in Task Manager.
+`install` copies `tao.exe` and `taow.exe` to `%LOCALAPPDATA%\Programs\Tao\`
+(the per-user equivalent of Program Files, no admin rights needed), replacing
+older copies there. If the installed watcher is running, nothing is copied and
+you are asked to quit it first (tray icon > Quit). It then writes the value
+`Tao` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing at
+the installed `taow.exe`, so rebuilding or moving the files you installed from
+no longer affects startup. Add that folder to your `PATH` to run `tao` from
+any terminal; `install` tells you if it isn't there yet, but doesn't change
+`PATH` itself.
+
+The entry shows up in Task Manager > Startup apps, where it can also be
+disabled. Windows records that separately, so writing the Run value again
+doesn't re-enable it; `install` checks and tells you if the entry is disabled
+there, without changing it. (Task Manager stores this as a binary value named
+`Tao` under `HKCU\...\Explorer\StartupApproved\Run`: its first byte is `02`
+when enabled and `03` when disabled, followed by the time it was disabled.
+Tao only reads it.)
+
+`uninstall` removes the Run value and leaves the installed files in place;
+an already-running watcher keeps going until you sign out or end `taow.exe` in
+Task Manager.
 
 Only one watcher runs at a time (a named mutex, `Local\tao-watch`),
 so running `tao watch` while the background one is active just exits.
@@ -108,9 +132,11 @@ you can open the config, fix it, and quit.
 | Rules / config        | `%APPDATA%\Tao\config.toml`           |
 | Move log (SQLite)     | `%LOCALAPPDATA%\Tao\moves.db`         |
 | Watcher logs (7 days) | `%LOCALAPPDATA%\Tao\logs\watch.*.log` |
+| Installed programs    | `%LOCALAPPDATA%\Programs\Tao\`        |
 
-Set `TAO_HOME` to put all three in one folder instead, which is
-handy for trying things out. The startup entry does not see this variable.
+Set `TAO_HOME` to put the config, move log and logs in one folder instead,
+which is handy for trying things out. The startup entry does not see this
+variable, and it doesn't change where `install` puts the programs.
 
 ## Config format
 
@@ -301,16 +327,18 @@ throwaway key under `HKCU\Software\tao-test-<pid>`, never the real
 | `watch.rs`      | Watcher loop: events, rescans, retries, config reload, commands   |
 | `tray.rs`       | Tray icon and menu (`tao` event loop on the main thread)          |
 | `logging.rs`    | Console and daily log-file output                                 |
-| `startup.rs`    | HKCU `Run` entry                                                  |
-| `win.rs`        | Win32 helpers: named mutex, ShellExecute                          |
+| `startup.rs`    | HKCU `Run` entry, Task Manager state, copying the executables     |
+| `win.rs`        | Win32 helpers: named mutex, ShellExecute, long-path conversion    |
+| `build.rs`      | Embeds icon, version info and manifest into both executables      |
 
 The tray runs the `tao` event loop on the main thread, which Windows requires
 because tray clicks arrive as window messages to the thread that created the
 icon. The watcher runs on a second thread, posts `WatchEvent`s to the loop
 through an `EventLoopProxy`, and takes commands (sort now, undo, pause,
 quit) over a channel. The icon is 32×32 RGBA bytes embedded with
-`include_bytes!` from `assets/tray-icon.rgba`; `assets/make-icon.ps1`
-regenerates it.
+`include_bytes!` from `assets/tray-icon.rgba`. `assets/make-icon.ps1`
+regenerates it from a pixel grid, together with `assets/tao.ico`, the
+executables' icon (16 to 256 px).
 
 ### Extension points
 
@@ -324,7 +352,19 @@ regenerates it.
 
 ## Known limitations
 
-- Paths longer than 260 characters are not supported unless long paths are
-  enabled in Windows.
-- If you rename or move the executables, run `tao install` again so the
-  startup entry points at the new location.
+- **Long paths.** Moving files works with paths of any length (up to
+  Windows' ~32,767 characters), whether or not long paths are enabled in
+  Windows: the mover passes paths over 260 characters to Windows with the
+  `\\?\` prefix, and both executables are marked `longPathAware`. Still
+  limited: opening such a folder from the tray's Recent moves (Explorer
+  itself handles long paths poorly), and any single file or folder *name*
+  longer than 255 characters (an NTFS limit).
+- **Download source** (`source_url`, `source_host`) is only known for files
+  that keep their `Zone.Identifier`: browser downloads on NTFS drives. It is
+  lost when a file is copied to a FAT/exFAT drive or unblocked in its
+  Properties, and some browsers record only `about:internet` in private
+  mode.
+- With `tao install --in-place`, the startup entry points at wherever
+  `taow.exe` was. If you rename, move or rebuild over it, run `tao install`
+  again. (The default `tao install` copies the programs and doesn't have this
+  problem.)

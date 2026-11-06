@@ -61,6 +61,18 @@ pub fn log_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("logs"))
 }
 
+/// Where `tao install` copies the executables: `%LOCALAPPDATA%\Programs\Tao`.
+///
+/// `%LOCALAPPDATA%\Programs` is the per-user counterpart of Program Files
+/// (per-user installers such as VS Code use it); it needs no admin rights
+/// and doesn't roam. `TAO_HOME` deliberately doesn't apply: the startup
+/// entry must point at a stable place that doesn't depend on a shell
+/// variable.
+pub fn install_dir() -> Result<PathBuf> {
+    let base = BaseDirs::new().context("could not determine the user's profile directories")?;
+    Ok(base.data_local_dir().join("Programs").join(APP_DIR))
+}
+
 /// The user's Downloads folder as Windows reports it.
 ///
 /// This asks the shell for `FOLDERID_Downloads` (via `SHGetKnownFolderPath`)

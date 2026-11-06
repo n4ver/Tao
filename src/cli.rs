@@ -38,7 +38,15 @@ pub enum Command {
     /// Show recent entries of the move log, or prune old ones.
     Log(LogArgs),
     /// Start `watch` automatically when you sign in to Windows.
-    Install,
+    ///
+    /// Copies tao.exe and taow.exe to %LOCALAPPDATA%\Programs\Tao and
+    /// registers that copy, so moving or rebuilding these files doesn't
+    /// break the startup entry.
+    Install {
+        /// Register taow.exe where it is now instead of copying it.
+        #[arg(long)]
+        in_place: bool,
+    },
     /// Remove the sign-in startup entry.
     Uninstall,
     /// Open the rules file in your default editor.

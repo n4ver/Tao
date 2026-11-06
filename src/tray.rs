@@ -21,7 +21,7 @@ use crate::win::SingleInstance;
 pub fn run_watch(headless: bool) -> Result<()> {
     // Sign-in startup plus a manual `tao watch` (or `install`, which also
     // starts one) would otherwise race each other for the same files.
-    let Some(_instance) = SingleInstance::acquire("tao-watch")? else {
+    let Some(_instance) = SingleInstance::acquire(crate::win::WATCHER_MUTEX)? else {
         tracing::info!("another watcher is already running; exiting");
         return Ok(());
     };

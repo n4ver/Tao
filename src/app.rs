@@ -22,14 +22,16 @@ pub fn run(command: Command) -> Result<()> {
         Command::Watch { headless } => crate::tray::run_watch(headless),
         Command::Undo { last } => undo_cmd(last),
         Command::Log(args) => log_cmd(&args),
-        Command::Install => install(),
+        Command::Install { in_place } => install(in_place),
         Command::Uninstall => uninstall(),
         Command::Config => config_cmd(),
     }
 }
 
-fn install() -> Result<()> {
-    let exe = startup::background_exe()?;
+fn install(in_place: bool) -> Result<()> {
+    if !cfg!(windows) {
+        bail!("`install` is only supported on Windows");
+    }
     // Fail now, not silently at the next sign-in, if the config is broken.
     let cfg = load_config()?;
     Planner::from_config(&cfg)?;
@@ -41,12 +43,11 @@ fn install() -> Result<()> {
             paths::HOME_ENV
         );
     }
-    if exe.components().any(|c| c.as_os_str() == "target") {
-        eprintln!(
-            "note: registering the build output folder. If you move or rebuild into \
-             another location, run `tao install` again from there."
-        );
-    }
+    let exe = if in_place {
+        install_in_place()?
+    } else {
+        install_copy()?
+    };
 
     let command = startup::command_line(&exe);
     startup::set(startup::RUN_KEY, startup::VALUE_NAME, &command)?;
@@ -55,10 +56,79 @@ fn install() -> Result<()> {
         startup::RUN_KEY,
         startup::VALUE_NAME
     );
+    warn_if_disabled_in_task_manager();
+    start_watcher(&exe)
+}
 
+/// The old behaviour: register `taow.exe` next to the running `tao.exe`.
+fn install_in_place() -> Result<std::path::PathBuf> {
+    let exe = startup::background_exe()?;
+    eprintln!(
+        "note: registering {} where it is. If you move, rename or delete it, \
+         run `tao install` again.",
+        exe.display()
+    );
+    Ok(exe)
+}
+
+/// Copies both executables to the install folder and returns the copy of
+/// `taow.exe` to register.
+fn install_copy() -> Result<std::path::PathBuf> {
+    let me = std::env::current_exe().context("cannot locate the running executable")?;
+    let from = me
+        .parent()
+        .context("the running executable has no folder")?;
+    let to = paths::install_dir()?;
+    let names = [startup::CLI_EXE, startup::BACKGROUND_EXE];
+    match startup::copy_executables(&names, from, &to)? {
+        startup::Copied::Copied => println!("Copied {} to {}", names.join(" and "), to.display()),
+        startup::Copied::AlreadyThere => println!("Already running from {}", to.display()),
+    }
+    if !on_path(&to, std::env::var_os("PATH")) {
+        println!(
+            "tip: add {} to your PATH (Settings > System > About > Advanced system settings > \
+             Environment Variables) to run `tao` from any terminal.",
+            to.display()
+        );
+    }
+    Ok(to.join(startup::BACKGROUND_EXE))
+}
+
+/// Whether `dir` is one of the folders in `path_var` (the value of `PATH`).
+/// Windows paths compare case-insensitively.
+fn on_path(dir: &Path, path_var: Option<std::ffi::OsString>) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    let want = norm(dir);
+    path_var.is_some_and(|v| std::env::split_paths(&v).any(|p| norm(&p) == want))
+}
+
+/// Task Manager > Startup apps can disable a Run entry without removing it;
+/// Windows then skips it at sign-in even though `install` just wrote it.
+/// Only reported here: the StartupApproved value is the user's choice.
+fn warn_if_disabled_in_task_manager() {
+    match startup::approval(startup::APPROVED_KEY, startup::VALUE_NAME) {
+        Ok(startup::Approval::Enabled) => {}
+        Ok(startup::Approval::Disabled) => eprintln!(
+            "warning: the Tao startup entry is disabled in Task Manager, so Windows won't \
+             start it at sign-in. Turn it back on in Task Manager > Startup apps > Tao > Enable."
+        ),
+        Err(e) => tracing::debug!("could not read the StartupApproved state: {e:#}"),
+    }
+}
+
+fn start_watcher(exe: &Path) -> Result<()> {
     // Start it now too, so there's no need to sign out and in. If one is
-    // already running, the new one notices (named mutex) and exits.
-    std::process::Command::new(&exe)
+    // already running (e.g. from the old location), the new one notices
+    // the named mutex and exits; say so rather than claim we started it.
+    if crate::win::SingleInstance::acquire(crate::win::WATCHER_MUTEX)?.is_none() {
+        println!(
+            "A watcher is already running, so no new one was started; the registered one \
+             takes over at the next sign-in. To switch now, quit the running one (tray \
+             icon > Quit) and run `tao install` again."
+        );
+        return Ok(());
+    }
+    std::process::Command::new(exe)
         // Don't hand our console's handles to the child; a shell waiting on
         // a pipe would otherwise wait for the watcher to exit.
         .stdin(Stdio::null())
@@ -78,6 +148,15 @@ fn uninstall() -> Result<()> {
         println!("Startup entry removed.");
     } else {
         println!("No startup entry was installed.");
+    }
+    if let Ok(dir) = paths::install_dir()
+        && dir.join(startup::BACKGROUND_EXE).exists()
+    {
+        println!(
+            "The installed copies in {} were left in place (Tao never deletes files); \
+             remove that folder yourself if you no longer want them.",
+            dir.display()
+        );
     }
     println!(
         "A watcher that is already running keeps going until you sign out, \
@@ -347,6 +426,19 @@ fn print_plan(plan: &Plan, root: &Path) {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(windows)]
+    #[test]
+    fn path_lookup_ignores_case_and_trailing_separator() {
+        let dir = Path::new(r"C:\Users\a\AppData\Local\Programs\Tao");
+        let path = r"C:\Windows;c:\users\A\appdata\local\programs\tao\;D:\bin";
+        assert!(on_path(dir, Some(path.into())));
+        assert!(!on_path(
+            dir,
+            Some(r"C:\Windows;C:\Users\a\AppData\Local\Programs".into())
+        ));
+        assert!(!on_path(dir, None));
+    }
 
     #[test]
     fn ages() {

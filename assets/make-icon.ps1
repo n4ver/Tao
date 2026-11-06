@@ -78,3 +78,57 @@ for ($y = 0; $y -lt $size; $y++) {
 }
 [IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'tray-icon.rgba'), $bytes)
 "wrote $($bytes.Length) bytes"
+
+# --- assets/tao.ico: the same art as the executables' icon (Explorer, Task
+# Manager, taskbar), embedded by build.rs via assets/tao.rc. Windows picks
+# the closest size, so provide the common ones. Whole multiples of 32 are
+# scaled nearest-neighbour to keep the pixel art crisp; 16 and 48 can't be,
+# so they are resampled smoothly. Each frame is stored as PNG (supported
+# in .ico files since Windows Vista).
+Add-Type -AssemblyName System.Drawing
+$src = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+for ($y = 0; $y -lt $size; $y++) {
+    for ($x = 0; $x -lt $size; $x++) {
+        $o = ($y * $size + $x) * 4
+        $src.SetPixel($x, $y, [System.Drawing.Color]::FromArgb($bytes[$o + 3], $bytes[$o], $bytes[$o + 1], $bytes[$o + 2]))
+    }
+}
+
+$frames = @()
+foreach ($n in 16, 32, 48, 64, 256) {
+    $bmp = New-Object System.Drawing.Bitmap $n, $n, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    if ($n % $size -eq 0) {
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
+        # Without this, nearest-neighbour scaling is shifted by half a pixel.
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
+    } else {
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    }
+    $g.DrawImage($src, 0, 0, $n, $n)
+    $g.Dispose()
+    $ms = New-Object IO.MemoryStream
+    $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+    $frames += , @($n, $ms.ToArray())
+}
+
+# ICO layout: ICONDIR (6 bytes), one 16-byte ICONDIRENTRY per frame, then
+# the frame data. A width/height byte of 0 means 256.
+$out = New-Object IO.MemoryStream
+$w = New-Object IO.BinaryWriter $out
+$w.Write([uint16]0); $w.Write([uint16]1); $w.Write([uint16]$frames.Count)
+$offset = 6 + 16 * $frames.Count
+foreach ($f in $frames) {
+    $dim = if ($f[0] -ge 256) { 0 } else { $f[0] }
+    $w.Write([byte]$dim); $w.Write([byte]$dim)
+    $w.Write([byte]0); $w.Write([byte]0)          # palette size, reserved
+    $w.Write([uint16]1); $w.Write([uint16]32)     # planes, bits per pixel
+    $w.Write([uint32]$f[1].Length); $w.Write([uint32]$offset)
+    $offset += $f[1].Length
+}
+foreach ($f in $frames) { $w.Write([byte[]]$f[1]) }
+$w.Flush()
+[IO.File]::WriteAllBytes((Join-Path $PSScriptRoot 'tao.ico'), $out.ToArray())
+"wrote tao.ico ($($frames.Count) sizes, $($out.Length) bytes)"

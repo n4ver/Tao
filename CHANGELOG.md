@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tao log --prune --older-than <duration>` removes failed moves and undone
   moves that undo and the watcher no longer need, with `--dry-run` and
   `--vacuum`. Moves that can still be undone are never pruned.
+- `tao install` warns if the startup entry is disabled in Task Manager
+  (it reads `StartupApproved\Run` but never changes it).
+- Both executables have an icon, version information and an application
+  manifest (`longPathAware`, `asInvoker`).
 - MIT license, this changelog, a minimum supported Rust version
   (`rust-version = "1.90"`) and Dependabot updates for Cargo and GitHub Actions.
 - CI runs on Ubuntu too (build, clippy, tests of the non-Windows fallbacks),
@@ -28,9 +32,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `tao install` copies `tao.exe` and `taow.exe` to
+  `%LOCALAPPDATA%\Programs\Tao\` and registers that copy, so rebuilding or
+  moving the originals no longer breaks startup. It refuses, copying
+  nothing, if the installed watcher is running. The old behaviour is
+  `tao install --in-place`. `uninstall` leaves the installed files in place.
+- Rule match reasons in the move log include the matched download URL.
 - The release workflow runs the whole CI suite first; a tag no longer
   publishes anything unless fmt, clippy and all tests pass. Release zips
   now include LICENSE and CHANGELOG.md.
+
+### Fixed
+
+- Moving files to or from paths longer than 260 characters failed (reported
+  as "file no longer exists") unless long paths were enabled in Windows and
+  the program was manifested for them. Such paths now get the `\\?\` prefix.
 
 ## [0.1.3] - 2026-11-04
 
