@@ -1,0 +1,41 @@
+# cargo-deny configuration: `cargo deny check` (also run in CI).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Only what is shipped: the Windows executables. Linux is built in CI to
+# exercise the portable fallbacks but never released. (Listing Linux here
+# too would make cargo-deny combine targets per edge and pull in GTK crates
+# that tray-icon only uses on Linux, which Tao never compiles.)
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+# Fail on any RustSec vulnerability or unsound advisory, and on yanked crates.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses compatible with distributing Tao under MIT.
+# MPL-2.0 (option-ext, via `directories`) is file-level copyleft: fine for
+# an unmodified dependency.
+# Kept to what the tree actually uses, so a new license shows up in review.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Several versions of one crate (e.g. windows-sys) are normal in this
+# ecosystem; report them without failing the build.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

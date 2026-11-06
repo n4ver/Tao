@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MIT license, this changelog, a minimum supported Rust version
   (`rust-version = "1.90"`) and Dependabot updates for Cargo and GitHub Actions.
+- CI runs on Ubuntu too (build, clippy, tests of the non-Windows fallbacks),
+  checks the MSRV, and runs `cargo deny` (advisories, licenses, sources).
+- README badges for CI status and the latest release.
+
+### Changed
+
+- The release workflow runs the whole CI suite first; a tag no longer
+  publishes anything unless fmt, clippy and all tests pass. Release zips
+  now include LICENSE and CHANGELOG.md.
 
 ## [0.1.3] - 2026-11-04
 

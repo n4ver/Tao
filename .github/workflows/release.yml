@@ -5,12 +5,17 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
+  # The full CI suite (fmt, clippy, tests on Windows and Ubuntu, MSRV,
+  # cargo deny). Nothing is published unless all of it passes.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -29,9 +34,6 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests
-        run: cargo test --all --locked
-
       - name: Build release binaries
         run: cargo build --release --locked
 
@@ -44,7 +46,7 @@ jobs:
           New-Item -ItemType Directory -Path $dir | Out-Null
           # Both executables: tao.exe (CLI) and taow.exe (tray / background watcher).
           # They must stay in the same folder for `tao install` to work.
-          Copy-Item target/release/tao.exe, target/release/taow.exe, README.md $dir
+          Copy-Item target/release/tao.exe, target/release/taow.exe, README.md, LICENSE, CHANGELOG.md $dir
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower() + "  $dir.zip" | Out-File "$dir.zip.sha256" -Encoding ascii
           "asset=$dir.zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

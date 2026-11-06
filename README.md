@@ -1,5 +1,8 @@
 # Tao
 
+[![CI](https://github.com/n4ver/Tao/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/n4ver/Tao/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/n4ver/Tao)](https://github.com/n4ver/Tao/releases/latest)
+
 Sorts your Windows Downloads folder into category folders, either once on
 demand or continuously in the background. It runs entirely on your machine,
 with no network access and no telemetry.
@@ -205,7 +208,13 @@ FROM moves ORDER BY id DESC LIMIT 20;
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt
+cargo deny check      # advisories, licenses, sources (cargo install cargo-deny)
 ```
+
+The minimum supported Rust version is in `Cargo.toml` (`rust-version`). CI
+checks it, runs the tests on Windows and on Ubuntu (which exercises the
+non-Windows fallbacks), and runs `cargo deny`. A release tag only publishes
+if all of that passes.
 
 File-moving tests use temporary directories only. Registry tests use a
 throwaway key under `HKCU\Software\tao-test-<pid>`, never the real

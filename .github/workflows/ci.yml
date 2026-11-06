@@ -4,12 +4,20 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Lets release.yml run these same checks and refuse to publish if they fail.
+  workflow_call:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  # The primary job: Tao is a Windows program, so this is where the real
+  # Win32 code paths (MoveFileExW, registry, ADS, tray) are compiled and tested.
+  windows:
+    name: Windows (fmt, clippy, test, release build)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,10 +34,73 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --all
+        run: cargo test --all --locked
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --locked
+
+  # Exercises the portable `#[cfg(not(windows))]` fallbacks so they keep
+  # compiling and their tests keep passing.
+  ubuntu:
+    name: Ubuntu (build, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --all-targets --locked
+
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --all --locked
+
+  # Keeps `rust-version` in Cargo.toml truthful.
+  msrv:
+    name: MSRV (cargo check on the rust-version toolchain)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^rust-version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check --all-targets --locked
+
+  # Security advisories (RustSec), licenses, banned/duplicate crates and
+  # crate sources, configured in deny.toml.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
